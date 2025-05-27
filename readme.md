@@ -1,4 +1,3 @@
-// 生成的文档内容
 # Cine Vision Backend 项目文档
 
 ## 1. 项目概述
