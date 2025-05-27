@@ -1,0 +1,44 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+model Movie {
+  id                       String    @id @unique
+  title                    String
+  vote_average             Float
+  vote_count               Int
+  status                   String
+  release_date             DateTime?
+  revenue                  BigInt
+  runtime                  Int?
+  budget                   BigInt
+  imdb_id                  String?
+  original_language        String?
+  original_title           String
+  overview                 String?
+  popularity               Float?
+  tagline                  String?
+  genres                   String[]
+  production_companies     Json
+  production_countries     String[]
+  spoken_languages         String[]
+  cast                     String[]
+  director                 String[]
+  director_of_photography  String[]
+  writers                  String[]
+  producers                String[]
+  music_composer           String[]
+  imdb_rating              Float?
+  imdb_votes               Int?
+  poster_path              String?
+
+  @@index([release_date])
+  @@index([genres], type: Gin)
+  @@index([vote_average])
+  //@@fulltext([title, overview, tagline])
+}
