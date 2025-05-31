@@ -152,7 +152,7 @@ export default {
 
 ## 5. 数据库模型
 ### `prisma/schema.prisma`
-``prisma
+```prisma
 model Movie {
   id                       String    @id @unique // 电影的唯一标识符
   title                    String // 电影标题
