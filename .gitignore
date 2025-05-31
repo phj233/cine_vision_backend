@@ -6,11 +6,3 @@ node_modules
 .windsurf
 /logs
 
-# 项目排除路径
-/src/controllers/visualization.controller.js
-/src/utils/advanced-clean-database.js
-/src/utils/clean-database.js
-/src/utils/db-test.js
-/src/utils/error-handler.js
-/src/utils/stream-processor.js
-/src/alias.js
