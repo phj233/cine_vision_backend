@@ -466,58 +466,92 @@ export class VisualizationController {
             }
 
             try {
-                // 查找与指定演员合作的其他演员
-                const collaborations = await prisma.$queryRaw`
-                WITH actor_movies AS (
-                    SELECT id
-                    FROM "Movie"
-                    WHERE ${actor} = ANY(cast)
-                ),
-                co_actors AS (
-                    SELECT 
-                        unnest(cast) as co_actor,
-                        COUNT(*) as collaboration_count
-                    FROM "Movie"
-                    WHERE 
-                        id IN (SELECT id FROM actor_movies) AND
-                        ${actor} = ANY(cast)
-                    GROUP BY co_actor
-                    HAVING unnest(cast) != ${actor}
-                    ORDER BY collaboration_count DESC
-                )
-                SELECT 
-                    co_actor, 
-                    collaboration_count
-                FROM co_actors
-                WHERE collaboration_count >= ${minCollaborationsNum}
-                LIMIT ${limitNum}
-            `;
+                // 首先使用Prisma的查询API获取包含该演员的电影ID列表
+                const actorMovies = await prisma.movie.findMany({
+                    where: {
+                        cast: {
+                            has: actor
+                        }
+                    },
+                    select: {
+                        id: true
+                    }
+                });
 
-                // 获取合作电影列表 - 使用原生SQL
-                const collaborationMovies = await prisma.$queryRaw`
-                    SELECT id, title, release_date, cast
-                    FROM "Movie"
-                    WHERE ${actor} = ANY(cast)
-                    ORDER BY release_date DESC
-                `;
+                // 提取电影ID列表
+                const movieIds = actorMovies.map(m => m.id);
+
+                if (movieIds.length === 0) {
+                    return {
+                        data: {
+                            actor,
+                            collaborations: [],
+                            movies: []
+                        },
+                        meta: {
+                            collaborationCount: 0,
+                            movieCount: 0
+                        }
+                    };
+                }
+
+                // 使用ORM查询获取合作演员
+                const collaborationMovies = await prisma.movie.findMany({
+                    where: {
+                        id: {
+                            in: movieIds
+                        }
+                    },
+                    select: {
+                        id: true,
+                        title: true,
+                        release_date: true,
+                        cast: true
+                    },
+                    orderBy: {
+                        release_date: 'desc'
+                    }
+                });
+
+                // 处理合作演员统计
+                const collaborationsMap = new Map<string, number>();
+
+                // 统计每个演员与主演员的合作次数
+                collaborationMovies.forEach(movie => {
+                    if (Array.isArray(movie.cast)) {
+                        movie.cast.forEach(coActor => {
+                            // 排除主演员自己
+                            if (coActor !== actor) {
+                                const currentCount = collaborationsMap.get(coActor) || 0;
+                                collaborationsMap.set(coActor, currentCount + 1);
+                            }
+                        });
+                    }
+                });
+
+                // 过滤掉合作次数不够的演员，并转换为数组
+                const collaborations = Array.from(collaborationsMap.entries())
+                    .filter(([_, count]) => count >= minCollaborationsNum)
+                    .map(([coActor, count]) => ({
+                        co_actor: coActor,
+                        collaboration_count: count.toString()
+                    }))
+                    .sort((a, b) => Number(b.collaboration_count) - Number(a.collaboration_count))
+                    .slice(0, limitNum);
 
                 return {
                     data: {
                         actor,
                         collaborations,
-                        movies: Array.isArray(collaborationMovies)
-                            ? collaborationMovies.map((m: any) => ({
-                                ...m,
-                                release_date: m.release_date ? new Date(m.release_date).toISOString().split("T")[0] : null,
-                            }))
-                            : [],
+                        movies: collaborationMovies.map(m => ({
+                            ...m,
+                            release_date: m.release_date ? new Date(m.release_date).toISOString().split("T")[0] : null,
+                        }))
                     },
                     meta: {
-                        collaborationCount: Array.isArray(collaborations)
-                            ? collaborations.length
-                            : 0,
-                        movieCount: Array.isArray(collaborationMovies) ? collaborationMovies.length : 0,
-                    },
+                        collaborationCount: collaborations.length,
+                        movieCount: collaborationMovies.length
+                    }
                 };
             } catch (error: any) {
                 logger.error(`获取演员合作网络数据失败 [演员:${actor}]:`, error);
@@ -807,19 +841,19 @@ export class VisualizationController {
                 const query = `
                     SELECT 
                         unnest(director) as director_name,
-                        COUNT(*) as movie_count,
+                        COUNT(*)::text as movie_count,
                         ROUND(AVG(vote_average)::numeric, 2) as avg_rating,
-                        SUM(revenue) as total_revenue
+                        SUM(revenue)::text as total_revenue
                     FROM "Movie"
                     WHERE 
                         director IS NOT NULL AND 
                         array_length(director, 1) > 0
                     GROUP BY director_name
-                    HAVING COUNT(*) >= $1
+                    HAVING COUNT(*) >= ${minMoviesNum}
                 `;
 
-                // 执行基本查询
-                const directorsData = await prisma.$queryRawUnsafe(query, minMoviesNum);
+                // 执行基本查询，直接使用内联参数
+                const directorsData = await prisma.$queryRawUnsafe(query);
 
                 // 在JavaScript中处理排序和截断
                 let sortedData = [];
@@ -862,9 +896,9 @@ export class VisualizationController {
                 return {
                     data: sortedData.map((director: any) => ({
                         ...director,
-                        movie_count: director.movie_count?.toString() || "0",
+                        movie_count: director.movie_count || "0",
                         avg_rating: director.avg_rating?.toString() || "0",
-                        total_revenue: director.total_revenue?.toString() || "0",
+                        total_revenue: director.total_revenue || "0",
                         top_movies: Array.isArray(director.top_movies)
                             ? director.top_movies.map((movie: any) => ({
                                 ...movie,
@@ -910,23 +944,23 @@ export class VisualizationController {
             const minMoviesNum = Number(minMovies);
 
             try {
-                // 使用简单的SQL查询而不使用嵌套子查询和LIMIT
+                // 使用简单的SQL查询而不使用嵌套子查询和LIMIT，并直接内联参数
                 const query = `
                     SELECT 
                         unnest(director_of_photography) as cinematographer_name,
-                        COUNT(*) as movie_count,
+                        COUNT(*)::text as movie_count,
                         ROUND(AVG(vote_average)::numeric, 2) as avg_rating
                     FROM "Movie"
                     WHERE 
                         director_of_photography IS NOT NULL AND 
                         array_length(director_of_photography, 1) > 0
                     GROUP BY cinematographer_name
-                    HAVING COUNT(*) >= $1
-                    ORDER BY movie_count DESC, avg_rating DESC
+                    HAVING COUNT(*) >= ${minMoviesNum}
+                    ORDER BY COUNT(*) DESC, avg_rating DESC
                 `;
 
                 // 执行基本查询
-                const cinematographersData = await prisma.$queryRawUnsafe(query, minMoviesNum);
+                const cinematographersData = await prisma.$queryRawUnsafe(query);
 
                 // 在JavaScript中处理限制数量
                 let resultData = [];
@@ -983,7 +1017,7 @@ export class VisualizationController {
                 return {
                     data: resultData.map((cinematographer: any) => ({
                         ...cinematographer,
-                        movie_count: cinematographer.movie_count?.toString() || "0",
+                        movie_count: cinematographer.movie_count || "0",
                         avg_rating: cinematographer.avg_rating?.toString() || "0",
                         top_movies: Array.isArray(cinematographer.top_movies)
                             ? cinematographer.top_movies.map((movie: any) => ({
@@ -1029,23 +1063,23 @@ export class VisualizationController {
             const minMoviesNum = Number(minMovies);
 
             try {
-                // 使用简单的SQL查询而不使用嵌套子查询和LIMIT
+                // 使用简单的SQL查询而不使用嵌套子查询和LIMIT，并直接内联参数
                 const query = `
                     SELECT 
                         unnest(music_composer) as composer_name,
-                        COUNT(*) as movie_count,
+                        COUNT(*)::text as movie_count,
                         ROUND(AVG(vote_average)::numeric, 2) as avg_rating
                     FROM "Movie"
                     WHERE 
                         music_composer IS NOT NULL AND 
                         array_length(music_composer, 1) > 0
                     GROUP BY composer_name
-                    HAVING COUNT(*) >= $1
-                    ORDER BY movie_count DESC, avg_rating DESC
+                    HAVING COUNT(*) >= ${minMoviesNum}
+                    ORDER BY COUNT(*) DESC, avg_rating DESC
                 `;
 
                 // 执行基本查询
-                const composersData = await prisma.$queryRawUnsafe(query, minMoviesNum);
+                const composersData = await prisma.$queryRawUnsafe(query);
 
                 // 在JavaScript中处理限制数量
                 let resultData = [];
@@ -1101,7 +1135,7 @@ export class VisualizationController {
                 return {
                     data: resultData.map((composer: any) => ({
                         ...composer,
-                        movie_count: composer.movie_count?.toString() || "0",
+                        movie_count: composer.movie_count || "0",
                         avg_rating: composer.avg_rating?.toString() || "0",
                         top_movies: Array.isArray(composer.top_movies)
                             ? composer.top_movies.map((movie: any) => ({
@@ -1147,204 +1181,82 @@ export class VisualizationController {
             const minMoviesNum = Number(minMovies);
 
             try {
-                // 确定要使用的LIMIT值并直接构建完整SQL查询
+                // 构建基本SQL查询 - 直接内联minMovies参数而不使用参数占位符
+                const baseQuery = `
+                    WITH all_talents AS (
+                        SELECT id, title, release_date, vote_average, 
+                            unnest(director) as person_name, 'director' as role
+                        FROM "Movie"
+                        WHERE array_length(director, 1) > 0
+                        UNION ALL
+                        SELECT id, title, release_date, vote_average, 
+                            unnest(writers) as person_name, 'writer' as role
+                        FROM "Movie"
+                        WHERE array_length(writers, 1) > 0
+                        UNION ALL
+                        SELECT id, title, release_date, vote_average, 
+                            unnest(producers) as person_name, 'producer' as role
+                        FROM "Movie"
+                        WHERE array_length(producers, 1) > 0
+                    ),
+                    role_counts AS (
+                        SELECT 
+                            person_name,
+                            COUNT(DISTINCT id)::integer as movie_count,
+                            array_agg(DISTINCT role) as roles,
+                            COUNT(DISTINCT role)::integer as role_count,
+                            ROUND(AVG(vote_average)::numeric, 2) as avg_rating
+                        FROM all_talents
+                        GROUP BY person_name
+                        HAVING 
+                            COUNT(DISTINCT id) >= ${minMoviesNum} AND
+                            COUNT(DISTINCT role) > 1
+                        ORDER BY role_count DESC, movie_count DESC
+                    )
+                    SELECT 
+                        t.person_name,
+                        t.movie_count,
+                        t.roles,
+                        t.role_count,
+                        t.avg_rating,
+                        (
+                            SELECT jsonb_agg(
+                                jsonb_build_object(
+                                    'id', m.id,
+                                    'title', m.title,
+                                    'vote_average', m.vote_average,
+                                    'release_date', m.release_date,
+                                    'roles', (
+                                        SELECT array_agg(at.role)
+                                        FROM all_talents at
+                                        WHERE at.id = m.id AND at.person_name = t.person_name
+                                    )
+                                )
+                            )
+                            FROM (
+                                SELECT DISTINCT id
+                                FROM all_talents
+                                WHERE person_name = t.person_name
+                                ORDER BY id
+                                LIMIT 5
+                            ) ids
+                            JOIN "Movie" m ON m.id = ids.id
+                        ) as movies
+                    FROM role_counts t
+                `;
+
+                // 根据limitNum确定LIMIT值
                 let query;
                 if (limitNum <= 10) {
-                    query = `
-                        WITH all_talents AS (
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(director) as person_name, 'director' as role
-                            FROM "Movie"
-                            WHERE array_length(director, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(writers) as person_name, 'writer' as role
-                            FROM "Movie"
-                            WHERE array_length(writers, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(producers) as person_name, 'producer' as role
-                            FROM "Movie"
-                            WHERE array_length(producers, 1) > 0
-                        ),
-                        role_counts AS (
-                            SELECT 
-                                person_name,
-                                COUNT(DISTINCT id)::integer as movie_count,
-                                array_agg(DISTINCT role) as roles,
-                                COUNT(DISTINCT role)::integer as role_count,
-                                ROUND(AVG(vote_average)::numeric, 2) as avg_rating
-                            FROM all_talents
-                            GROUP BY person_name
-                            HAVING 
-                                COUNT(DISTINCT id) >= $1 AND
-                                COUNT(DISTINCT role) > 1
-                            ORDER BY role_count DESC, movie_count DESC
-                        )
-                        SELECT 
-                            t.person_name,
-                            t.movie_count,
-                            t.roles,
-                            t.role_count,
-                            t.avg_rating,
-                            (
-                                SELECT jsonb_agg(
-                                    jsonb_build_object(
-                                        'id', m.id,
-                                        'title', m.title,
-                                        'vote_average', m.vote_average,
-                                        'release_date', m.release_date,
-                                        'roles', (
-                                            SELECT array_agg(at.role)
-                                            FROM all_talents at
-                                            WHERE at.id = m.id AND at.person_name = t.person_name
-                                        )
-                                    )
-                                )
-                                FROM (
-                                    SELECT DISTINCT id
-                                    FROM all_talents
-                                    WHERE person_name = t.person_name
-                                    ORDER BY id
-                                    LIMIT 5
-                                ) ids
-                                JOIN "Movie" m ON m.id = ids.id
-                            ) as movies
-                        FROM role_counts t
-                        LIMIT 10
-                    `;
+                    query = baseQuery + 'LIMIT 10';
                 } else if (limitNum <= 20) {
-                    query = `
-                        WITH all_talents AS (
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(director) as person_name, 'director' as role
-                            FROM "Movie"
-                            WHERE array_length(director, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(writers) as person_name, 'writer' as role
-                            FROM "Movie"
-                            WHERE array_length(writers, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(producers) as person_name, 'producer' as role
-                            FROM "Movie"
-                            WHERE array_length(producers, 1) > 0
-                        ),
-                        role_counts AS (
-                            SELECT 
-                                person_name,
-                                COUNT(DISTINCT id)::integer as movie_count,
-                                array_agg(DISTINCT role) as roles,
-                                COUNT(DISTINCT role)::integer as role_count,
-                                ROUND(AVG(vote_average)::numeric, 2) as avg_rating
-                            FROM all_talents
-                            GROUP BY person_name
-                            HAVING 
-                                COUNT(DISTINCT id) >= $1 AND
-                                COUNT(DISTINCT role) > 1
-                            ORDER BY role_count DESC, movie_count DESC
-                        )
-                        SELECT 
-                            t.person_name,
-                            t.movie_count,
-                            t.roles,
-                            t.role_count,
-                            t.avg_rating,
-                            (
-                                SELECT jsonb_agg(
-                                    jsonb_build_object(
-                                        'id', m.id,
-                                        'title', m.title,
-                                        'vote_average', m.vote_average,
-                                        'release_date', m.release_date,
-                                        'roles', (
-                                            SELECT array_agg(at.role)
-                                            FROM all_talents at
-                                            WHERE at.id = m.id AND at.person_name = t.person_name
-                                        )
-                                    )
-                                )
-                                FROM (
-                                    SELECT DISTINCT id
-                                    FROM all_talents
-                                    WHERE person_name = t.person_name
-                                    ORDER BY id
-                                    LIMIT 5
-                                ) ids
-                                JOIN "Movie" m ON m.id = ids.id
-                            ) as movies
-                        FROM role_counts t
-                        LIMIT 20
-                    `;
+                    query = baseQuery + 'LIMIT 20';
                 } else {
-                    query = `
-                        WITH all_talents AS (
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(director) as person_name, 'director' as role
-                            FROM "Movie"
-                            WHERE array_length(director, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(writers) as person_name, 'writer' as role
-                            FROM "Movie"
-                            WHERE array_length(writers, 1) > 0
-                            UNION ALL
-                            SELECT id, title, release_date, vote_average, 
-                                unnest(producers) as person_name, 'producer' as role
-                            FROM "Movie"
-                            WHERE array_length(producers, 1) > 0
-                        ),
-                        role_counts AS (
-                            SELECT 
-                                person_name,
-                                COUNT(DISTINCT id)::integer as movie_count,
-                                array_agg(DISTINCT role) as roles,
-                                COUNT(DISTINCT role)::integer as role_count,
-                                ROUND(AVG(vote_average)::numeric, 2) as avg_rating
-                            FROM all_talents
-                            GROUP BY person_name
-                            HAVING 
-                                COUNT(DISTINCT id) >= $1 AND
-                                COUNT(DISTINCT role) > 1
-                            ORDER BY role_count DESC, movie_count DESC
-                        )
-                        SELECT 
-                            t.person_name,
-                            t.movie_count,
-                            t.roles,
-                            t.role_count,
-                            t.avg_rating,
-                            (
-                                SELECT jsonb_agg(
-                                    jsonb_build_object(
-                                        'id', m.id,
-                                        'title', m.title,
-                                        'vote_average', m.vote_average,
-                                        'release_date', m.release_date,
-                                        'roles', (
-                                            SELECT array_agg(at.role)
-                                            FROM all_talents at
-                                            WHERE at.id = m.id AND at.person_name = t.person_name
-                                        )
-                                    )
-                                )
-                                FROM (
-                                    SELECT DISTINCT id
-                                    FROM all_talents
-                                    WHERE person_name = t.person_name
-                                    ORDER BY id
-                                    LIMIT 5
-                                ) ids
-                                JOIN "Movie" m ON m.id = ids.id
-                            ) as movies
-                        FROM role_counts t
-                        LIMIT 50
-                    `;
+                    query = baseQuery + 'LIMIT 50';
                 }
 
-                // 执行查询
-                const crossRoleTalents = await prisma.$queryRawUnsafe(query, minMoviesNum);
+                // 执行查询 - 不需要传递参数，因为已经内联到查询中
+                const crossRoleTalents = await prisma.$queryRawUnsafe(query);
 
                 return {
                     data: Array.isArray(crossRoleTalents)
