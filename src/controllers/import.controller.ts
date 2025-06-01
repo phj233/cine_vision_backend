@@ -41,7 +41,7 @@ export class ImportController {
             logger.info('收到文件上传请求');
 
             // 使用 parts() 方法获取上传的内容
-            const parts = await req.parts();
+            const parts = req.parts();
 
             let filePart: FilePart | null = null;
 
