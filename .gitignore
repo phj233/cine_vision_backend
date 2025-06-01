@@ -6,3 +6,6 @@ node_modules
 .windsurf
 /logs
 
+# 忽略js
+/src/**/*.js
+
